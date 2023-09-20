@@ -1,0 +1,1547 @@
+---
+title: "MIND study - Data analysis"
+author: "Till Omansen, Charlotte Kriebel & Hugo Soubrier"
+date: "*`r Sys.Date()`*"
+output: 
+  html_document: 
+    css: "style.css"
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE)
+```
+
+# Introduction, Aims & Objectives 
+
+The Aims of the document is to follow along the workflow of the data analysis and the construction process of the data visualisation requested by Charlotte and Till for the MIND study. 
+
+This is a dynamic and interactive `.html` document generated using the R programming language and especially the `{rmarkdown}` package. It can be open in any web browser, and does not require an internet connection. When applicable, data visualisations and tables are interactive, and can be hovered on to display more data. Interactive graph can be downloaded do `.png` by clicking on the top-right corner. Other statis graphs are saved to `.png` by me. I will send every output. 
+
+Main packages used: 
+
+- [`{rmarkdown}`](https://rmarkdown.rstudio.com/lesson-1.html) and [`{knitr}`](https://yihui.org/knitr/) are used to generate the current report 
+
+- Most of the data wrangling and cleaning is done using the [`{tidyverse}`](https://www.tidyverse.org)
+
+- Static visualisations are created using [`{ggplot2}` ](https://ggplot2.tidyverse.org) 
+
+- Summary tables are created using the [`{gtsummary}`](https://www.danieldsjoberg.com/gtsummary/) package 
+- Interactive visualisations are done using the wrapper for the Highchart JavaScript library: [`{highcharter}`](https://jkunst.com/highcharter/)
+
+```{r load packages, echo = FALSE}
+
+# Load packages ---------------------------
+
+pacman::p_load(
+  
+  rio,          # import funcs
+  here,         # create relative paths
+  janitor,      # data cleaning
+  epikit,       # handy inline functions for epidemiology
+  lubridate,    # date handling
+  gtsummary,    # summary table
+  flextable,    # Nice table format
+  highcharter,  # interactive graphs
+  ggpubr,       # Publication ready plot
+  rstatix,      # Statistical analysis in R 
+  tidyverse     # data science 
+  
+)
+
+```
+
+```{r sources, echo = FALSE}
+
+source(here("funcs", "utils.R"))
+
+```
+
+```{r data import, echo = FALSE}
+
+data <- import(here("data", "MIND_data_clean.rds"))
+
+```
+
+# Dataset description 
+
+The current dataset is made of `r nrow(data)` participants, with `r fmt_count(data, survivor_control == "survivor")` **survivors**, and `r fmt_count(data, survivor_control == "control")` **controls**. 
+
+# Demographic Data 
+
+```{r demographic tab, echo = TRUE}
+
+#create a count table 
+counts_dat <- data %>%
+  
+  select(survivor_control, 
+         gender, 
+         age_cat, 
+         state,
+         marital_status,
+         religion, 
+         education_level, 
+         household, 
+         interval_dis_int_cat
+  ) 
+
+
+counts_tab <- counts_dat %>% 
+  
+  select(-survivor_control) %>% 
+  
+  tbl_summary(label = list(gender = "Gender", 
+                           age_cat = "Age categories, years", 
+                           state = "State of residence",
+                           education_level = "Highest Education level", 
+                           marital_status = "Marital status",
+                           religion = "Religion", 
+                           household = "Household location",
+                           interval_dis_int_cat = "Time since discharge"))
+
+
+#create a demographic table startified by survivor_control
+demo_tab <- counts_dat %>% 
+  
+  tbl_summary(by = survivor_control, 
+              
+              label = list(gender = "Gender", 
+                           age_cat = "Age categories, years", 
+                           state = "State of residence",
+                           education_level = "Highest Education level", 
+                           marital_status = "Marital status",
+                           religion = "Religion", 
+                           household = "Household location",
+                           interval_dis_int_cat = "Time since discharge")) %>% 
+  
+  italicize_levels() %>% 
+  
+  bold_labels() 
+
+#change the time since discharge variable in controls (0 (0%)) to -
+
+demo_tab$table_body <- demo_tab$table_body %>% 
+      mutate(stat_2 = case_when(variable == "interval_dis_int_cat" ~ gsub("^0.*", "-", stat_2 ), 
+                                .default = stat_2))
+
+# Merge both table together
+demo_tab_final <- tbl_merge(list(counts_tab, demo_tab), tab_spanner = FALSE) %>% 
+  
+  as_gt() %>% 
+  
+  gt::tab_options(table.font.size = 12)
+
+#Save the table
+#gt::gtsave(demo_tab_final, "output/demographic_tab.png")
+
+demo_tab_final
+
+```
+
+> - One note here, for *ethnicity*, *village*, *state* there is too many categories - either it is grouped in wider categories or dropped from table
+> - Other point, if we merge together counts and controls vs survivors we have 0 controls with a Time since discharge - shall it be split ? 
+
+# Screening tools 
+
+There are three screening tools investigated and represented by the following variables: `pcl_5_score`, `phq_9_score`, `gad_7_score`. 
+
+```{r screen_tool_summary func }
+
+#a function to calculate the summary info of the screening tools variables and can be stratified by a variable 
+
+screen_tool_summary <- function(dat, group_variable) {
+  
+  dat %>% 
+    
+    pivot_longer(cols = c(pcl_5_score, 
+                          phq_9_score, 
+                          gad_7_score ), 
+                 names_to = "score", 
+                 values_to = "score_value") %>% 
+    
+    group_by(score, {{group_variable}}) %>% 
+    
+    summarise(n = n(), 
+              min = round(digits = 2, min(score_value)), 
+              mean = round(digits = 2, mean(score_value)),
+              sd = round(digits = 2, sd(score_value)), 
+              median = round(digits = 2, median(score_value)),
+              max = round(digits = 2, max(score_value))) %>% 
+    
+    ungroup() %>% 
+    
+    #calculate the CI 
+    mutate(low_CI = round(digits = 2, mean - 1.96 * sd/ sqrt(sum(n)) ), 
+           up_CI = round(digits = 2, mean + 1.96 * sd/ sqrt(sum(n)) )) %>% 
+    
+    relocate(c(low_CI, up_CI), .after = sd) %>% 
+    
+    mutate(score = recode(score, 
+                          gad_7_score = "GAD-7", 
+                          pcl_5_score = "PCL-5", 
+                          phq_9_score = "PHQ-9"
+    ), 
+    score = fct_relevel(score, c("GAD-7","PHQ-9","PCL-5"))) %>% 
+    
+    arrange(score)
+  
+}
+
+```
+
+
+```{r screen_tool main summary}
+
+screen_tool_summary(data, NULL) %>% 
+  
+  flextable::qflextable() %>% 
+  
+  set_caption(caption = "Summary of screening tools score", 
+              align_with_table = FALSE)
+
+#save the table as PNG
+#flextable::save_as_image(screen_tools_tab, path = here("output", "screening_tools_tab.png"))
+
+```
+
+
+```{r screening tool ggplot, eval = FALSE, echo = FALSE}
+
+# a ggplot graph for mean screening tool score - used if needed to save .png different from highcharter
+
+screen_tool_gg <- function(data, group_var, col_vec ){
+  
+  data %>% 
+    
+    ggplot(aes(x = score, 
+               
+               y = mean,
+               
+               fill = {{group_var}})) +
+    
+    geom_col(position = position_dodge(), alpha = .8 ) +
+    
+    geom_linerange(aes(ymin = low_CI, ymax = up_CI), 
+                   position = position_dodge(width = 1), 
+                   col = "black", 
+                   alpha = .7) +
+    
+    scale_fill_manual(name = "Status", values = col_vec ) +
+    
+    #theme
+    hrbrthemes::theme_ipsum(base_size = 10, 
+                            strip_text_size = 6, 
+                            axis_title_size = 10, 
+                            plot_margin = margin(10, 10, 10, 10),
+                            plot_title_size = 10,
+                            subtitle_size = 9, 
+                            subtitle_face = "italic"
+    ) +
+    
+    labs(title = "Distribution of mean score for screening tools")
+  
+}
+
+surv_col <- c("control" = "#92CD83", "survivor" = "#C28779" )
+
+screen_tool_summary(data, survivor_control) %>% 
+  
+  screen_tool_gg(group_var = survivor_control, col_vec = surv_col )
+
+```
+
+```{r screen_tool_hc func}
+
+screen_tool_hc <- function(dat) { 
+  
+  hchart(dat, 
+         "column",
+         hcaes(x = score,
+               y = mean, 
+               color = color ) ) %>% 
+    
+    hc_add_series(
+      dat,
+      "errorbar", 
+      hcaes(y = mean,
+            x = score,
+            low = low_CI, 
+            high = up_CI),
+      enableMouseTracking = TRUE,
+      showInLegend = FALSE
+    ) %>% 
+    
+    hc_plotOptions(
+      errorbar = list(
+        color = "black", 
+        whiskerLength = 1,
+        stemWidth = 1
+      ) 
+    ) %>% 
+    
+    hc_xAxis(title = list(text = "Screening tool")) %>%
+    
+    hc_yAxis(title = list(text = "Mean score")) %>% 
+    
+    hc_title(text = paste0("Barchart of mean screening tool score" ), 
+             
+             align = "left", 
+             margin = 10,
+             x = 50,
+             style = list(useHTML = T, color = "#34495E", fontSize = 13)) %>% 
+    
+    hc_subtitle(text = str_glue("based on {unique(summarise(group_by(screen_tool_summary(data, gender), score), sum = sum(n))$sum)} participants"), 
+                
+                align = "left", 
+                margin = 10,
+                x = 50,
+                style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+    ) %>% 
+    
+    hc_tooltip(useHTML = T,
+               formatter = JS(
+                 "
+     function(){
+     outHTML =  '<b>'+ this.point.score + '</b> ' + '<br>'  + 'N participants: ' + this.point.n + '<br> Range: ' + this.point.min + ' - ' + this.point.max + '<br> Mean (95% CI): ' + this.point.mean + ' (' + this.point.low_CI + ' - ' + this.point.up_CI + ')'
+     return(outHTML)
+     }
+     ")) %>% 
+    
+    hc_exporting(enabled = TRUE)
+  
+}
+```
+Here is the distribution of the mean score of the three screening tools 
+
+```{r main screen tool hc}
+screen_tool_hc(screen_tool_summary(data, NULL) %>% 
+                 
+                 mutate(color = case_when(score == "GAD-7" ~ "#ADDB9C", 
+                                          score == "PCL-5" ~ "#9CC9DB", 
+                                          score == "PHQ-9" ~ "#DB9CAE") ))
+```
+
+
+```{r survivor_control screen tool hc}
+
+# Cannot generalise more the function because I need to know n levels for error bar matching 
+
+survivor_col <- c("#C28779", "#92CD83")
+
+hchart(
+  screen_tool_summary(data, survivor_control), 
+  "column",
+  hcaes(x = score,
+        y = mean, 
+        group = survivor_control),
+  
+  id = c("a", "b")
+  
+) %>%
+  
+  hc_add_series(
+    screen_tool_summary(data, survivor_control),
+    "errorbar", 
+    hcaes(y = mean,
+          x = score,
+          low = low_CI, 
+          high = up_CI, 
+          group = survivor_control),
+    enableMouseTracking = TRUE,
+    showInLegend = FALSE,
+    linkedTo = c("a", "b")
+  ) %>% 
+  
+  hc_plotOptions(
+    errorbar = list(
+      color = "black", 
+      whiskerLength = 1,
+      stemWidth = 1
+    ) 
+  ) %>% 
+  
+  hc_colors(survivor_col) %>% 
+  
+  hc_xAxis(title = list(text = "Screening tool")) %>%
+  
+  hc_yAxis(title = list(text = "Mean score")) %>% 
+  
+  hc_title(text = paste0("Barchart of mean screening tool score for survivors and controls" ), 
+           
+           align = "left", 
+           margin = 10,
+           x = 50,
+           style = list(useHTML = T, color = "#34495E", fontSize = 13)) %>% 
+  
+  hc_subtitle(text = str_glue("based on {nrow(data)} participants"), 
+              
+              align = "left", 
+              margin = 10,
+              x = 50,
+              style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+  ) %>% 
+  
+  hc_tooltip(useHTML = T,
+             formatter = JS(
+               "
+     function(){
+     outHTML =  '<b>'+ this.point.score + '</b> - <i>' + this.point.survivor_control + '</i><br>'  + 'N participants: ' + this.point.n + '<br> Range: ' + this.point.min + ' - ' + this.point.max + '<br> Mean (95% CI): ' + this.point.mean + ' (' + this.point.low_CI + ' - ' + this.point.up_CI + ')'
+     return(outHTML)
+     }
+     ")) %>% 
+  
+  hc_exporting(enabled = TRUE)
+
+```
+
+```{r surv-data sub}
+#make a sub dataset keeping only survivors 
+
+surv_data <- filter(data, survivor_control == "survivor")
+
+```
+
+
+```{r gender screen tool hc}
+
+gender_col <- c("#DB9CCE", "#9CD1DB")
+
+hchart(
+  screen_tool_summary(surv_data, gender), 
+  "column",
+  hcaes(x = score,
+        y = mean, 
+        group = gender),
+  
+  id = c("a", "b")
+  
+) %>%
+  
+  hc_add_series(
+    screen_tool_summary(surv_data, gender),
+    "errorbar", 
+    hcaes(y = mean,
+          x = score,
+          low = low_CI, 
+          high = up_CI, 
+          group = gender),
+    
+    enableMouseTracking = TRUE,
+    showInLegend = FALSE,
+    linkedTo = c("a", "b")
+  ) %>% 
+  
+  hc_plotOptions(
+    errorbar = list(
+      color = "black", 
+      whiskerLength = 1,
+      stemWidth = 1
+    ) 
+  ) %>% 
+  
+  hc_colors(gender_col) %>% 
+  
+  hc_xAxis(title = list(text = "Screening tool")) %>%
+  
+  hc_yAxis(title = list(text = "Mean score")) %>% 
+  
+  hc_title(text = paste0("Barchart of mean screening tool score by gender" ), 
+           
+           align = "left", 
+           margin = 10,
+           x = 50,
+           style = list(useHTML = T, color = "#34495E", fontSize = 13)) %>% 
+  
+  hc_subtitle(text = str_glue("based on {nrow(surv_data)} survivors"), 
+              
+              align = "left", 
+              margin = 10,
+              x = 50,
+              style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+  ) %>% 
+  
+  hc_tooltip(useHTML = T,
+             formatter = JS(
+               "
+     function(){
+     outHTML =  '<b>'+ this.point.score + '</b> - <i>' + this.point.gender + '</i><br>'  + 'N survivors: ' + this.point.n + '<br> Range: ' + this.point.min + ' - ' + this.point.max + '<br> Mean (95% CI): ' + this.point.mean + ' (' + this.point.low_CI + ' - ' + this.point.up_CI + ')'
+     return(outHTML)
+     }
+     ")) %>% 
+  
+  hc_exporting(enabled = TRUE)
+
+```
+
+
+```{r age_cat screen tool hc}
+
+age_col <- c("#ffba08", "#e85d04", "#6a040f")
+
+hchart(
+  screen_tool_summary(surv_data, age_cat), 
+  "column",
+  hcaes(x = score,
+        y = mean, 
+        group = age_cat),
+  
+  id = c("a", "b", "c")
+  
+) %>%
+  
+  hc_add_series(
+    screen_tool_summary(surv_data, age_cat),
+    "errorbar", 
+    hcaes(y = mean,
+          x = score,
+          low = low_CI, 
+          high = up_CI, 
+          group = age_cat),
+    enableMouseTracking = TRUE,
+    showInLegend = FALSE,
+    linkedTo = c("a", "b", "c")
+  ) %>% 
+  
+  hc_plotOptions(
+    errorbar = list(
+      color = "black", 
+      whiskerLength = 1,
+      stemWidth = 1
+    ) 
+  ) %>% 
+  
+  hc_colors(age_col) %>% 
+  
+  hc_xAxis(title = list(text = "Screening tool")) %>%
+  
+  hc_yAxis(title = list(text = "Mean score")) %>% 
+  
+  hc_title(text = paste0("Barchart of mean screening tool score by age categories" ), 
+           
+           align = "left", 
+           margin = 10,
+           x = 50,
+           style = list(useHTML = T, color = "#34495E", fontSize = 13)) %>% 
+  
+  hc_subtitle(text = str_glue("based on { nrow(surv_data) } survivors"), 
+              
+              align = "left", 
+              margin = 10,
+              x = 50,
+              style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+  ) %>% 
+  
+  hc_tooltip(useHTML = T,
+             formatter = JS(
+               "
+     function(){
+     outHTML =  '<b>'+ this.point.score + '</b> - <i>' + this.point.age_cat + '</i><br>'  + 'N survivors: ' + this.point.n + '<br> Range: ' + this.point.min + ' - ' + this.point.max + '<br> Mean (95% CI): ' + this.point.mean + ' (' + this.point.low_CI + ' - ' + this.point.up_CI + ')'
+     return(outHTML)
+     }
+     ")) %>% 
+  
+  hc_exporting(enabled = TRUE)
+
+```
+
+
+```{r}
+
+interval_col <- c(#"#ade8f4", 
+                  "#90e0ef", 
+                  "#00b4d8", 
+                  "#0096c7", 
+                  #"#0077b6",
+                  "#023eA8", 
+                  "black")
+
+hchart(
+  screen_tool_summary(surv_data, interval_dis_int_cat), 
+  "column",
+  hcaes(x = score,
+        y = mean, 
+        group = interval_dis_int_cat),
+  
+  id = c("a", "b", "c", "d")
+  
+) %>%
+  
+  hc_add_series(
+    screen_tool_summary(surv_data, interval_dis_int_cat),
+    "errorbar", 
+    hcaes(y = mean,
+          x = score,
+          low = low_CI, 
+          high = up_CI, 
+          group = interval_dis_int_cat),
+    
+    enableMouseTracking = TRUE,
+    showInLegend = FALSE,
+    linkedTo = c("a", "b", "c", "d")
+  ) %>% 
+  
+  hc_plotOptions(
+    errorbar = list(
+      color = "black", 
+      whiskerLength = 1,
+      stemWidth = 1
+    )
+  ) %>% 
+  
+  hc_colors(interval_col) %>% 
+  
+  hc_xAxis(title = list(text = "Screening tool")) %>%
+  
+  hc_yAxis(title = list(text = "Mean score")) %>% 
+  
+  hc_title(text = paste0("Barchart of mean screening tool score by time since LF ward discharge" ), 
+           
+           align = "left", 
+           margin = 10,
+           x = 50,
+           style = list(useHTML = T, color = "#34495E", fontSize = 13)) %>% 
+  
+  hc_subtitle(text = str_glue("based on {nrow(surv_data)} survivors"), 
+              
+              align = "left", 
+              margin = 10,
+              x = 50,
+              style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+  ) %>% 
+  
+  hc_tooltip(useHTML = T,
+             formatter = JS(
+               "
+     function(){
+     outHTML =  '<b>'+ this.point.score + '</b> - <i>' + this.point.interval_dis_int_cat + '</i><br>'  + 'N survivors: ' + this.point.n + '<br> Range: ' + this.point.min + ' - ' + this.point.max + '<br> Mean (95% CI): ' + this.point.mean + ' (' + this.point.low_CI + ' - ' + this.point.up_CI + ')'
+     return(outHTML)
+     }
+     ")) %>% 
+  
+  hc_exporting(enabled = TRUE) 
+
+```
+
+> The interactive graphs can be exported to .png using the button on the top-right corner. Also those graphs can be exported as `{ggplot2}` plots (another type of static visualisation) if preffered. I already have the script so would just need to run them once. 
+
+# Psychatric disorder
+Three psychatric disorders were further investigated using the MINI questionnaire following a score for the screening tools above the cut-off. These diagnosis are represented by the `diagnosis_depression`, `diagnosis_anxiety`, `diagnosis_ptsd`
+
+```{r psy_disorder data prep}
+
+psy_disorders <- c("diagnosis_depression", "diagnosis_anxiety", "diagnosis_ptsd")
+
+#make function to prep data 
+psy_disorder_data_prep <- function(dat, group_var) {
+  
+  data_prep <- dat %>% 
+    
+    select(c(survivor_control, 
+             gender,
+             age_cat, 
+             interval_dis_int_cat, 
+             all_of(psy_disorders) )) %>% 
+    
+    pivot_longer(cols = psy_disorders, 
+                 values_to = "result", 
+                 names_to = "diagnosis_type") %>% 
+    
+    mutate(diagnosis_type = str_remove(diagnosis_type, "diagnosis_"), 
+           diagnosis_type = recode(diagnosis_type, 
+                                   "anxiety" = "Anxiety", 
+                                   "depression" = "Depression", 
+                                   "ptsd" = "PTSD")) %>% 
+    
+    group_by(diagnosis_type, {{group_var}} ) %>% 
+    
+    summarise(n = n(), 
+              confirmed = sum(result), 
+              percent = round(confirmed/n * 100, digits = 1), 
+              non_confirmed = n - confirmed
+    ) %>% ungroup() 
+  
+  return(data_prep)
+}
+
+#apply without grouping var
+data %>% 
+  
+  psy_disorder_data_prep(NULL) %>%  
+  
+  select(-non_confirmed) %>% 
+  
+  kable_table("Summary of results for the three diagnosis")
+
+```
+
+
+```{r psy_disorder bar func}
+#function to get bar charts 
+
+psy_disorder_hc <- function(dat, group_var, name_group, col_vec) {
+  
+  dat %>% 
+    
+    rename("group_var" = {{group_var}} ) %>% 
+    
+    hchart("column", 
+           
+           hcaes(x = diagnosis_type, y = percent, group = group_var)
+           
+    ) %>% 
+    
+    hc_colors( col_vec ) %>% 
+    
+    hc_xAxis(title = list(text = "Diagnosis")) %>%
+    
+    hc_yAxis(title = list(text = "Percent of cases (%)")) %>% 
+    
+    hc_title(text = paste0("Barchart of percent cases by <b>", name_group ), 
+             
+             align = "left", 
+             margin = 10,
+             x = 50,
+             style = list(useHTML = T, color = "#34495E", fontSize = 13)) %>% 
+    
+    hc_tooltip(useHTML = T,
+               formatter = JS(
+                 "
+     function(){
+     outHTML =  '<b>'+ this.point.diagnosis_type + '</b> - <i>' + this.point.group_var + '</i><br>'  + 'N participants: '+ this.point.n  + '<br>' + 'N diagnosed cases: ' + this.point.confirmed + ' (' + this.point.percent + '%) '
+     return(outHTML)
+     }
+     ")) %>% 
+    
+    hc_exporting(enabled = TRUE)
+  
+}
+
+```
+
+```{r}
+psy_disorder_hc(psy_disorder_data_prep(data, survivor_control), 
+                group_var = survivor_control, 
+                name_group = "survivor and control", 
+                col_vec = survivor_col  ) %>% 
+  
+  hc_subtitle(text = str_glue("based on { nrow(data) } participants"), 
+                
+                align = "left", 
+                margin = 10,
+                x = 50,
+                style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+    )
+```
+
+```{r}
+psy_disorder_hc(psy_disorder_data_prep(surv_data, gender), 
+                group_var = gender, 
+                name_group = "gender", 
+                col_vec = gender_col  ) %>% 
+  
+  hc_subtitle(text = str_glue("based on { nrow(surv_data) } survivors"), 
+                
+                align = "left", 
+                margin = 10,
+                x = 50,
+                style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+    )
+```
+
+```{r}
+psy_disorder_hc(psy_disorder_data_prep(surv_data, age_cat), 
+                group_var = age_cat, 
+                name_group = "age categories", 
+                col_vec = age_col  ) %>% 
+  
+  hc_subtitle(text = str_glue("based on { nrow(surv_data) } survivors"), 
+                
+                align = "left", 
+                margin = 10,
+                x = 50,
+                style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+    )
+```
+
+```{r}
+psy_disorder_hc(psy_disorder_data_prep(surv_data, interval_dis_int_cat), 
+                group_var = interval_dis_int_cat, 
+                name_group = "time from discharge", 
+                col_vec = interval_col  ) %>% 
+  
+  hc_subtitle(text = str_glue("based on { nrow(surv_data) } survivors"), 
+                
+                align = "left", 
+                margin = 10,
+                x = 50,
+                style = list(useHTML = T, color = "#34495E", fontSize = 10, fontStyle = "italic") 
+    )
+```
+
+Here are the results of the Chi-square computation 
+
+```{r}
+
+# create a ggplot barchart function
+psy_disorder_gg <- function(dat, group_var, name_group, col_vec) {
+  
+  dat %>% 
+    
+    ggplot() + 
+    
+    geom_col(aes(x = diagnosis_type, 
+                 y = percent, 
+                 fill = {{group_var}}), 
+             position = position_dodge(), 
+             alpha = .7) +
+    
+    scale_fill_manual(name = name_group, 
+                      values = col_vec) +
+    
+    #theme
+    hrbrthemes::theme_ipsum(base_size = 10, 
+                            strip_text_size = 6, 
+                            axis_title_size = 10, 
+                            plot_margin = margin(10, 10, 10, 10),
+                            plot_title_size = 10,
+                            subtitle_size = 9, 
+                            subtitle_face = "italic"
+    ) +
+    
+    labs(title = paste0("Distribution of confirmed diagnosis by ", name_group), 
+         subtitle = "based on 230 participants", 
+         x = "Diagnosis") 
+  
+}
+
+#function to calculate chi-square p-values for a group variable 
+
+data_stat <- function(dat, group_var) {
+  
+  psy_disorders_full <- c("Anxiety", "Depression", "PTSD")
+  
+  suppressWarnings(  purrr::map_df(
+    
+    psy_disorders_full, 
+    
+    ~ dat  %>%  
+      
+      filter(diagnosis_type == .x) %>% 
+      
+      select(confirmed, non_confirmed) %>% 
+      
+      chisq_test() %>% 
+      
+      mutate(diagnosis_type = .x) %>% 
+      
+      select(statistic, p, p.signif, diagnosis_type)) )
+  
+}
+
+```
+
+
+```{r survivor bar gg}
+
+survivor_dat <- psy_disorder_data_prep(data, survivor_control)
+
+p <-  survivor_dat %>% 
+  
+  psy_disorder_gg(., survivor_control, "status", survivor_col) 
+
+# Calculate p-values 
+chi_res <- data_stat(survivor_dat, survivor_control) %>% 
+  
+  relocate(diagnosis_type, 1) %>% 
+  
+  mutate(group1 = "Control",
+         group2 = "Survivor") %>% 
+  
+  mutate(x = c(.75, 1.75, 2.75),
+         xend = c(1.25, 2.25, 3.25), 
+         y.position = c(max(filter(survivor_dat, diagnosis_type == "Anxiety")$percent) +1, 
+                        max(filter(survivor_dat, diagnosis_type == "Depression")$percent) +1,
+                        max(filter(survivor_dat, diagnosis_type == "PTSD")$percent) +1
+         ) )
+
+#add p-values to graph
+p + stat_pvalue_manual(chi_res, 
+                       x = "diagnosis_type",
+                       label = "p.signif") +
+  
+  geom_segment(data = chi_res, 
+               aes(x = x, 
+                   xend = xend,
+                   y = y.position - .1,
+                   yend = y.position - .1), 
+               alpha = .7)
+
+```
+
+```{r gender bar gg}
+
+# data 
+gender_dat <- psy_disorder_data_prep(surv_data, gender)  
+
+# do graph 
+p <-  gender_dat %>% psy_disorder_gg(., gender, "gender", gender_col) +labs(subtitle = str_glue("based on {nrow(surv_data)} survivors"))
+
+# Calculate p-values 
+chi_res <- data_stat(gender_dat, gender) %>% 
+  
+  relocate(diagnosis_type, 1) %>% 
+  
+  mutate(group1 = "Male",
+         group2 = "Female") %>% 
+  
+  mutate(x = c(.75, 1.75, 2.75),
+         xend = c(1.25, 2.25, 3.25), 
+         y.position = c( max(filter(gender_dat, diagnosis_type == "Anxiety")$percent) +1, 
+                         max(filter(gender_dat, diagnosis_type == "Depression")$percent) +1,
+                         max(filter(gender_dat, diagnosis_type == "PTSD")$percent) +1 ) )
+
+#add p-values to graph
+p + stat_pvalue_manual(chi_res, 
+                       x = "diagnosis_type",
+                       label = "p.signif") +
+  
+  geom_segment(data = chi_res, 
+               aes(x = x, 
+                   xend = xend,
+                   y = y.position - .1,
+                   yend = y.position - .1), 
+               alpha = .7 )
+``` 
+
+```{r age_cat bar gg}
+
+# data 
+age_dat <- psy_disorder_data_prep(surv_data, age_cat)  
+
+# do graph 
+p <-  age_dat %>% psy_disorder_gg(., age_cat, "age categories", age_col) +labs(subtitle = str_glue("based on {nrow(surv_data)} survivors"))
+
+# Calculate p-values 
+chi_res <- data_stat(age_dat, age_cat) %>% 
+  
+  relocate(diagnosis_type, 1) %>% 
+  
+  mutate(group1 = "Male",
+         group2 = "Female") %>% 
+  
+  mutate(x = c(.75, 1.75, 2.75),
+         xend = c(1.25, 2.25, 3.25), 
+         y.position = c( max(filter(age_dat, diagnosis_type == "Anxiety")$percent) +1, 
+                         max(filter(age_dat, diagnosis_type == "Depression")$percent) +1,
+                         max(filter(age_dat, diagnosis_type == "PTSD")$percent) +1 ) )
+
+#add p-values to graph
+p + stat_pvalue_manual(chi_res, 
+                       x = "diagnosis_type",
+                       label = "p.signif") +
+  
+  geom_segment(data = chi_res, 
+               aes(x = x, 
+                   xend = xend,
+                   y = y.position - .1,
+                   yend = y.position - .1), 
+               alpha = .7 )
+``` 
+
+
+
+
+
+```{r interval gg bar}
+
+
+int_dat <- psy_disorder_data_prep(surv_data, interval_dis_int_cat)
+
+p <-  int_dat %>% 
+  
+  psy_disorder_gg(., interval_dis_int_cat, "Time from discharge", interval_col) + labs(subtitle = str_glue("based on {nrow(surv_data)} survivors"))
+
+# Calculate p-values 
+chi_res <- data_stat(int_dat, interval_dis_int_cat) %>% 
+  
+  relocate(diagnosis_type, 1) %>% 
+  
+  mutate(group1 = "Control",
+         group2 = "Survivor") %>% 
+  
+  mutate(x = c(.75, 1.75, 2.75),
+         xend = c(1.25, 2.25, 3.25), 
+         y.position = c(max(filter(int_dat, diagnosis_type == "Anxiety")$percent) +1, 
+                        max(filter(int_dat, diagnosis_type == "Depression")$percent) +1,
+                        max(filter(int_dat, diagnosis_type == "PTSD")$percent) +1
+         ) )
+
+#add p-values to graph
+p + stat_pvalue_manual(chi_res, 
+                       x = "diagnosis_type",
+                       label = "p.signif") +
+  
+  geom_segment(data = chi_res, 
+               aes(x = x, 
+                   xend = xend,
+                   y = y.position - .1,
+                   yend = y.position - .1), 
+               alpha = .7)
+
+```
+
+> Note here, the bar plot displaying p-values of the chi-square tests are only feasible in `{ggplot2}` so cannot be interactive. 
+
+# Any psychiatric disorder 
+
+Using the result of the MINI questionnaire, the participants were diagnosed for Anxiety, Depression and/or PTSD. There is a total of `r fmt_count(data, psy_disorder_y_n)` of participants that were diagnosed for at least one of those psychatric disorders. 
+
+```{r}
+
+data %>% 
+  
+  select(all_of(psy_disorders)) %>% 
+  
+  mutate(across(psy_disorders, ~ case_when(.x == TRUE ~ 1, 
+                                           .x == FALSE ~ 0 ))) %>% 
+  
+  rowSums(.) %>%
+  
+  tabyl() %>% 
+  
+  rename( "N disorders" = 1) %>% 
+  
+  adorn_totals() %>% 
+  
+  adorn_pct_formatting() %>% 
+  
+  kable_table("Distribution of number of diagnosed disorders")
+
+```
+
+Table of association between at least one psychiatric disorder. First only looking at survivors of LF: 
+
+> Note here, given that some categories of some variables had 0s I recoded some of them to allow for their inclusion in the table : `marital_status` and ìnterval_dis_int` 
+
+Here is the table of the univariate analysis for the **survivors** only. 
+
+```{r survivor tab}
+
+#recode some variables
+data_tab <- data %>% 
+  
+  select(psy_disorder_y_n, 
+         survivor_control,
+         gender, 
+         age_cat, 
+         marital_status,
+         religion, 
+         education_level,  
+         household,
+         interval_dis_int_cat
+  ) %>%
+  
+  #make marital_status Widowed as NA other brings 0 in the regression
+  mutate(marital_status = na_if(marital_status, "Widowed"), 
+         
+         interval_dis_int_cat = na_if(interval_dis_int_cat, "unknown"),
+         
+         interval_dis_int_cat = if_else(interval_dis_int_cat  == "less than 6 months ago", "less than 6 months ago", "more than 6 months ago"),
+
+         interval_dis_int_cat = fct_relevel(interval_dis_int_cat,
+                                            c("less than 6 months ago",
+                                              "more than 6 months ago") ),
+         
+         psy_disorder_y_n = if_else(psy_disorder_y_n, "Psychiatric diagnosis", "No psychiatric diagnosis"), 
+         psy_disorder_y_n = fct_relevel(psy_disorder_y_n, c("Psychiatric diagnosis", "No psychiatric diagnosis" )))
+
+
+#filter data table to keep survivors
+data_tab_surv <- data_tab %>% filter(survivor_control == "survivor") %>% select(-survivor_control)
+
+# Make a simple descriptive table 
+descr_tab_surv <- data_tab_surv %>% 
+  
+  gtsummary::tbl_summary(psy_disorder_y_n, 
+                         missing = "no",
+                         
+                         label = list(gender = "Gender",
+                                      age_cat = "Age categories, years",
+                                      religion = "Religion", 
+                                      education_level = "Highest Education level", 
+                                      household = "Household location", 
+                                      marital_status = "Marital status",
+                                      interval_dis_int_cat = "Time since discharge")) %>% 
+  
+  italicize_levels() %>% 
+  bold_labels()
+
+
+#Make a univariate regression table 
+uni_tab_surv <- data_tab_surv %>% 
+  
+  #recode outcome variable for the regression
+  mutate(psy_disorder_y_n = if_else(psy_disorder_y_n == "Psychiatric diagnosis", 1, 0)) %>% 
+  
+  gtsummary::tbl_uvregression(
+    
+    method = glm, 
+    y = psy_disorder_y_n,
+    exponentiate = TRUE, 
+    method.args = list(family = binomial), 
+    
+    label = list(gender = "Gender",
+                 age_cat = "Age categories, years",
+                 religion = "Religion", 
+                 education_level = "Highest Education level",
+                 marital_status = "Marital status",
+                 household = "Household location", 
+                 interval_dis_int_cat = "Time since discharge"
+    )
+    
+  ) %>% 
+  
+  modify_table_styling(
+    
+    column = c(stat_n),
+    hide = TRUE) %>%
+  
+  italicize_levels() %>% 
+  bold_labels()
+
+#merge tables 
+full_tab_surv <- tbl_merge(
+  
+  list(descr_tab_surv, uni_tab_surv), tab_spanner = c("", "")) 
+
+full_tab_surv %>%   
+  as_gt() %>%
+  
+  gt::tab_source_note(gt::md(str_glue("*based on {nrow(surv_data)} survivors*")) ) %>%
+  
+  gt::tab_options(table.font.size = 12)
+
+#save the table
+#gt::gtsave(full_tab_surv, "output/regression_tab_surv.png")
+```
+
+```{r control tab}
+
+#filter data table to keep survivors
+data_tab_cont <- data_tab %>% 
+  filter(survivor_control == "control") %>% 
+  select(-c(survivor_control, interval_dis_int_cat))
+
+# Make a simple descriptive table 
+descr_tab_cont <- data_tab_cont %>% 
+  
+  gtsummary::tbl_summary(psy_disorder_y_n, 
+                         missing = "no",
+                         
+                         label = list(gender = "Gender",
+                                      age_cat = "Age categories, years",
+                                      religion = "Religion", 
+                                      education_level = "Highest Education level", 
+                                      household = "Household location", 
+                                      marital_status = "Marital status" )) %>% 
+  
+  italicize_levels() %>% 
+  bold_labels()
+
+#Make a univariate regression table 
+uni_tab_cont <- data_tab_cont %>%
+  
+  #recode outcome variable for the regression
+  mutate(psy_disorder_y_n = if_else(psy_disorder_y_n == "Psychiatric diagnosis", 1, 0)) %>% 
+  
+  gtsummary::tbl_uvregression(
+    
+    method = glm, 
+    y = psy_disorder_y_n,
+    exponentiate = TRUE, 
+    method.args = list(family = binomial), 
+    
+    label = list(gender = "Gender",
+                 age_cat = "Age categories, years",
+                 religion = "Religion", 
+                 education_level = "Highest Education level",
+                 marital_status = "Marital status",
+                 household = "Household location" 
+    )
+    
+  ) %>% 
+  
+  modify_table_styling(
+    
+    column = c(stat_n),
+    hide = TRUE) %>%
+  
+  italicize_levels() %>% 
+  bold_labels()
+
+
+#change the Age OR in the control to - because there is a 0 
+
+uni_tab_cont$table_body <- uni_tab_cont$table_body %>% mutate(across(c(estimate, std.error, conf.low, conf.high, ci, p.value), ~ if_else(label == "40+", NA, .x) ))
+
+#merge tables 
+full_tab_cont <- tbl_merge(
+  
+  list(descr_tab_cont, uni_tab_cont), tab_spanner = c("**Any psychiatric disorder**", "**Univariate analysis**")) 
+
+#%>%
+# as_gt() %>%
+# 
+#   gt::tab_source_note(gt::md(str_glue("*based on {nrow(data)} study participants*")) )
+
+#save the table
+#gt::gtsave(full_tab_cont, "output/regression_tab_cont.png")
+
+```
+
+Here is the table for both the **survivors** and the **controls**
+
+```{r merge surv and cont tab}
+
+#merge all tables together 
+full_tab <- tbl_merge(
+  
+  list(full_tab_surv, full_tab_cont), tab_spanner = c("**Survivors**", "**Controls**")) %>%   
+  
+  as_gt() %>% 
+  
+  gt::tab_source_note(gt::md(str_glue("*based on {nrow(data)} study participants*")) )
+
+
+#save the table
+#gt::gtsave(full_tab, "output/full_regression_tab.png")
+
+full_tab %>% 
+  
+  gt::tab_options(table.font.size = 12)
+
+```
+
+> The table are saved in .png in local - I will send it to you - it cannot be directly downloaded from there. In .png they much better than here because margins are narrower here
+
+# Time analysis 
+
+```{r time since discharge box}
+
+surv_data %>%
+  
+  select(interval_dis_int_cat, 
+         interval_dis_int, 
+         psy_disorder_y_n, 
+         diagnosis_depression, 
+         diagnosis_ptsd, 
+         diagnosis_anxiety
+  ) %>%
+  
+  mutate(psy_disorder_y_n = if_else(psy_disorder_y_n, "Yes", "No")) %>% 
+  
+  ggplot(aes(x = interval_dis_int)) +
+  
+  geom_histogram(aes(fill = interval_dis_int_cat), bins = 65) +
+  
+  scale_fill_manual(values = c("less than 6 months ago" = "#90e0ef", 
+                               
+                               "6 -  less than 12 months ago" = "#00b4d8", 
+                               
+                               "12 - less than 18 months ago" = "#0096c7", 
+                               
+                               "more than 18 months ago" = "#023eA8",
+                               
+                               "unknown" = "black") ) +
+  
+  #theme
+  hrbrthemes::theme_ipsum(base_size = 10, 
+                          strip_text_size = 6, 
+                          axis_title_size = 10, 
+                          plot_margin = margin(10, 10, 10, 10),
+                          plot_title_size = 10,
+                          subtitle_size = 9, 
+                          subtitle_face = "italic"
+  ) +
+  
+  labs(title = paste0("Distribution of time since discharge for survivors"), 
+       subtitle = str_glue("based on { nrow(surv_data) } survivors"), 
+       caption = str_glue("There is {nrow(filter(surv_data, is.na(interval_dis_int)))} survivors with missing data for time since discharge")) +
+  
+  xlab("Time since discharge (days)") +
+  ylab("Counts")
+
+```
+
+```{r interval violin plot}
+
+data %>%
+  
+  select(interval_dis_int_cat, 
+         interval_dis_int, 
+         psy_disorder_y_n, 
+         diagnosis_depression, 
+         diagnosis_ptsd, 
+         diagnosis_anxiety
+  ) %>%
+  
+  pivot_longer(cols = c(psy_disorders, psy_disorder_y_n ), 
+               names_to = "diagnosis_type", 
+               values_to = "result") %>% 
+  
+  filter(result) %>% 
+  
+  mutate(result = if_else(result, "Yes", "No"), 
+         diagnosis_type = str_remove(diagnosis_type, "diagnosis_"), 
+         
+         diagnosis_type = case_when(
+           
+           diagnosis_type == "ptsd" ~ "PTSD", 
+           diagnosis_type == "depression" ~ "Depression", 
+           diagnosis_type == "anxiety" ~ "Anxiety", 
+           diagnosis_type == "psy_disorder_y_n" ~ "Any disorder"
+         ), 
+         diagnosis_type = fct_relevel(diagnosis_type, c("Anxiety", 
+                                                        "Depression", 
+                                                        "PTSD", 
+                                                        "Any disorder"))) %>% 
+  
+  ggplot(aes(y = interval_dis_int, 
+             x = diagnosis_type )) +
+  
+  geom_violin(alpha = .2, fill = "grey", col = "grey") +
+  
+  geom_jitter(width = 0.1, 
+              height = 0.1, 
+              col = "darkred") +
+  
+  coord_flip() +
+  
+  #theme
+  hrbrthemes::theme_ipsum(base_size = 10, 
+                          strip_text_size = 6, 
+                          axis_title_size = 10, 
+                          plot_margin = margin(10, 10, 10, 10),
+                          plot_title_size = 10,
+                          subtitle_size = 9, 
+                          subtitle_face = "italic"
+  ) +
+  
+  labs(title = paste0("Distribution of time since discharge for diagnosed participants"), 
+       subtitle = str_glue("based on { nrow(filter(data, psy_disorder_y_n)) } participants"), 
+       caption = str_glue("There is {nrow(filter(data, psy_disorder_y_n, is.na(interval_dis_int)))} diagnosed participants with missing data for time since discharge (controls) ")) +
+  
+  xlab("Diagnosis") +
+  ylab("Time since discharge (days)")
+
+
+```
+
+# Likert Scales 
+
+```{r likert data prep}
+
+sub <- 
+  data %>% select(contains("likert"))
+
+#prepare the data for Likert scale
+
+likert <- sub %>% 
+  
+  pivot_longer(contains("likert"),
+               names_to = "item", 
+               values_to = "grade") %>% 
+  
+  group_by(item) %>% 
+  
+  summarise(n = n(), 
+            
+            n_strongly_disagree = sum(grade == "strongly disagree"),
+            percent_strongly_disagree = round(n_strongly_disagree/n * 100, digits = 1),
+            
+            n_disagree = sum(grade == "disagree"), 
+            percent_disagree = round(n_disagree/n * 100, digits = 1),
+            
+            n_neutral = sum(grade == "neutral"), 
+            percent_neutral = round(n_neutral/n * 100, digits = 1),
+            
+            n_agree = sum(grade == "agree"), 
+            percent_agree = round(n_agree/n * 100, digits = 1),
+            
+            n_strongly_agree = sum(grade == "strongly agree"),
+            percent_strongly_agree = round(n_strongly_agree/n * 100, digits = 1)
+            
+  ) %>% 
+  
+  select(-c(contains("n_"), n))
+
+mylevels<-c("Strongly disagree", "Disagree", "Neutral", "Agree",  "Strongly agree")
+
+# divide the values of the neutral category by 2 - to span both sides - create two variable
+
+likert <- likert %>% mutate(midlow = percent_neutral/2, 
+                            midhigh = percent_neutral/2
+) %>% 
+  
+  select(-percent_neutral)
+
+# color palette 
+temp.rows <- 15
+numlevels <- 6
+
+#get palette
+pal <- RColorBrewer::brewer.pal( (5) ,"RdBu")
+
+#make the neutral as grey
+pal[3] <- "#DFDFDF"
+
+legend.pal <- pal
+
+pal <- c( "#CA0020", "#F4A582", "#DFDFDF", "#DFDFDF", "#92C5DE", "#0571B0")
+
+# pivot longer
+likert_long <- likert %>% 
+  
+  pivot_longer( cols = c(contains("percent"), midlow, midhigh), 
+                names_to = "answer", 
+                values_to = "percent") %>% 
+  
+  mutate( answer = str_remove(answer, "percent_"), 
+          answer = str_replace_all(answer, "_", " "), 
+          answer = str_to_sentence(answer), 
+          
+          answer = fct_relevel(answer, 
+                               
+                               c( "Strongly disagree", "Disagree", "Midlow", "Midhigh", "Agree",  "Strongly agree")
+                               
+                               
+          )) %>% arrange(answer)
+
+# add color of palette - need to set levels of item
+likert_long <- likert_long %>% 
+  
+  mutate(
+    col = rep(pal, each=temp.rows), 
+    
+    question = case_when(
+      
+      str_detect(item, "likert_1_") ~ "I believe LF is an infectious disease",
+      str_detect(item, "likert_2_") ~ "LF is a serious and potentially deadly disease",
+      str_detect(item, "likert_3_") ~ "I feared for my life when on the LF ward",
+      str_detect(item, "likert_4_") ~ "My stay on the LF ward was mentally burdening for me",
+      str_detect(item, "likert_5_") ~ "My stay on the LF ward was burdening for my family",
+      str_detect(item, "likert_6_") ~ "The isolation measurements/ restrictions of movement scared me",
+      str_detect(item, "likert_7_") ~ "The masks and gowns of the nurses and doctors scared me",
+      str_detect(item, "likert_8_") ~ "While on the ward, I feared to infect others e.g., family members",
+      str_detect(item, "likert_9_") ~ "The severity of the disease in other patients scared me",
+      str_detect(item, "likert_10_") ~ "My life is the same as before having LF",
+      str_detect(item, "likert_11_") ~ "People treat me differently now because I have had LF",
+      str_detect(item, "likert_12_") ~ "I have problems with my job / occupation because I have had LF",
+      str_detect(item, "likert_13_") ~ "I have problems with my relationship because I have had LF",
+      str_detect(item, "likert_14_") ~ "I fear to still infect others with LF",
+      str_detect(item, "likert_15_") ~ "I think having had LF gave me a substantial financial burden"), 
+    
+    question = str_wrap( question, 40), 
+    question = str_replace_all(question, "\\n", "<br>")
+  ) 
+
+#get an item order
+item_order <- likert_long %>% 
+  
+  mutate(answer_type = case_when(answer %in% c("Strongly disagree", "Disagree", "Midlow") ~ "negative", 
+                                 answer %in% c("Agree", "Strongly agree", "Midhigh") ~"positive" )) %>% 
+  
+  group_by(question, answer_type) %>% 
+  
+  summarise(sum_percent = sum(percent) ) %>%
+  
+  filter(answer_type == "negative") %>% 
+  
+  arrange(desc(sum_percent)) %>% pull(c(question))
+
+#Separate high and low bars
+
+highs<- filter(likert_long, answer %in% c("Midhigh", "Agree", "Strongly agree"))
+
+lows<- filter(likert_long, answer %in% c("Midlow", "Disagree", "Strongly disagree")) 
+
+```
+
+```{r likert chart ggplot, out.width = '80%'}
+
+#Plot the graph 
+
+p <- ggplot(data = likert_long, aes(x = factor(question, item_order) )) + 
+  
+  geom_bar(data = highs, 
+           
+           aes(y = percent, 
+               fill = col, 
+               group = desc(answer)
+           ), 
+           alpha = .9,
+           position="stack", 
+           stat= "identity") +
+  
+  geom_bar(data = lows, 
+           
+           aes(y= -percent, 
+               fill = col, 
+               group = answer
+           ), 
+           alpha = .9,
+           position="stack", 
+           stat= "identity") +
+  
+  geom_hline(yintercept = 0, color =c("white")) +
+  
+  coord_flip() +
+  
+  scale_fill_identity("Answers",
+                      labels = mylevels,
+                      breaks= legend.pal,
+                      guide="legend") +
+  
+  scale_y_continuous(breaks = seq(-100, 100, by = 10))+
+  
+  #theme
+  hrbrthemes::theme_ipsum(base_size = 10, 
+                          strip_text_size = 6, 
+                          axis_title_size = 10, 
+                          plot_margin = margin(10, 10, 10, 10),
+                          plot_title_size = 12,
+                          subtitle_size = 9, 
+                          subtitle_face = "italic",
+                          grid_col = "#cccccc"
+  ) +
+  
+  theme(
+    
+    #axis.text.y = element_text(size = 8, face = "italic" ),
+    
+    axis.text.y = ggtext::element_markdown(vjust = 0, 
+                                           hjust = 0, 
+                                           halign = -0, 
+                                           size = 14, 
+                                           face = "italic" ),
+    axis.text.x = element_text(size = 14) ) +
+  
+  labs(title = "Summary of Likert questionnaire", 
+       subtitle = str_glue("based on {nrow(surv_data)} survivors"), 
+       x = "", 
+       y = "Proportion (%)")
+
+#ggsave(here("output", "likert_chart.png"), p)
+```
+
+![](../output/likert_chart.png)
+
+> The aspect ratio of the chart, and the way the y axis text is split is easily changeable. 
+

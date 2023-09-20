@@ -1,0 +1,70 @@
+# ---------------------------
+# Script name: robert_digital-tools_barchart.R
+#
+# Purpose of script: quick barchart 
+#
+# Author: Hugo Soubrier
+#
+# Date Created: 2023-09-20
+#
+# Copyright (c) Hugo SOUBRIER, 2023
+# Email: soubrierhugo@gmail.com
+# ---------------------------
+# Notes:
+#   
+#
+#
+# ---------------------------
+
+# Load packages ---------------------------
+
+pacman::p_load(
+  
+  rio,          # import funcs
+  here,         # create relative paths
+  janitor,      # data cleaning
+  lubridate,    # date handling
+  tidyverse     # data science 
+  
+)
+
+#Import data 
+
+dat <- import(here("data", "prop_digital_tools.xlsx")) %>% as_tibble()
+
+
+# GGplot 
+
+gg <- dat %>% 
+  
+  mutate(use = fct_reorder(use, desc(proportion))) %>% 
+  
+  ggplot(aes(x = use, y = proportion )) +
+  
+  geom_col(fill = "lightblue", 
+           alpha = .8,
+           width = .5)+
+  
+  geom_text(aes(label = proportion), vjust = 1.5, colour = "black", alpha = .7, size = 3 ) +
+  
+  scale_fill_manual(name = "Status", values = "blue" ) +
+  
+  scale_x_discrete(labels = scales::label_wrap(1)) +
+  
+  #theme
+  hrbrthemes::theme_ipsum(base_size = 10, 
+                          strip_text_size = 6, 
+                          axis_title_size = 10, 
+                          plot_margin = margin(10, 10, 10, 10),
+                          plot_title_size = 10,
+                          subtitle_size = 9, 
+                          subtitle_face = "italic", 
+                          axis_text_size = 10
+  ) +
+  
+  xlab('Digital tools') +
+  
+  ylab("Proportion") 
+
+ggsave("output/barcharts/robert_digital-tools_barchart.png", gg)
+
